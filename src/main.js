@@ -1,80 +1,85 @@
-// 运行在 Electron 主进程 下的插件入口
-const {ipcMain} = require("electron");
+// 运行在 Electron 主进程 下的插件入口（新版 RM-IPC 兼容 / 无日志落盘）
+const { ipcMain } = require("electron");
 const path = require("path");
-const {pluginLog} = require("./utils/logUtils");
-const {Config} = require("./Config");
 const fs = require("fs");
-const {ipcModifyer} = require("./utils/ipcUtils");
-const pluginPath = path.join(LiteLoader.plugins.grab_redbag.path.plugin);//插件目录
+
+const { pluginLog } = require("./utils/logUtils");
+const { Config } = require("./Config");
+
+const pluginPath = path.join(LiteLoader.plugins.grab_redbag.path.plugin); // 插件目录
 const configPath = path.join(LiteLoader.plugins.grab_redbag.path.data, "config.json");
-const config = Config.config
+const config = Config.config;
 
-onLoad()//妈的，启动！
+onLoad(); // 启动！
 
-const chatWindows = []//收集聊天窗口
-
-// 创建窗口时触发
-module.exports.onBrowserWindowCreated = window => {
-    // window 为 Electron 的 BrowserWindow 实例
-
-    //监听preload发来的请求webContentsID
-    window.webContents.on('ipc-message-sync', (event, channel) => {
-        if (channel == '___!boot') {
-            event.returnValue = {
-                enabled: true,
-                webContentsId: window.webContents.id.toString(),
-            };
-        }
-    });
-
-    window.webContents.on("did-stop-loading", async () => {
-        if (window.id === 2 && chatWindows.length === 0) {//只改QQ主窗口就行了
-            chatWindows.push(window)
-            //pluginLog(JSON.stringify(config))
-
-            if (config.isActiveAllGroups)//如果激活所有群，就拦截取消激活的事件，使得激活的聊天不会被取消
-            {
-                window.webContents._events["-ipc-message"] = ipcModifyer(window.webContents._events["-ipc-message"])
-                pluginLog("成功修改deleteActiveChatByUid事件")
-            }
-        }
-    })
-}
+const chatWindows = []; // 收集聊天窗口（QQ 主窗口）
 
 /**
- * 主进程发消息通知所有渲染进程中的聊天窗口
- * @param message
- * @param args
+ * 创建窗口时触发：仅保留 webContentsId 的同步提供，以及记录主窗口引用。
+ * 不再修改任何私有 _events（旧版 ipc 拦截已删除）。
+ */
+module.exports.onBrowserWindowCreated = (window) => {
+  // 供 preload 同步获取 webContentsId
+  window.webContents.on("ipc-message-sync", (event, channel) => {
+    if (channel === "___!boot") {
+      event.returnValue = {
+        enabled: true,
+        webContentsId: String(window.webContents.id),
+      };
+    }
+  });
+
+  // 记录 QQ 主窗口（通常 id === 2），用于群发消息
+  window.webContents.on("did-stop-loading", () => {
+    if (window.id === 2 && chatWindows.length === 0) {
+      chatWindows.push(window);
+      pluginLog("已收集 QQ 主窗口引用（用于群发消息）");
+    }
+  });
+};
+
+/**
+ * 主进程向所有渲染进程中的聊天窗口广播消息
  */
 function sendMsgToChatWindows(message, args) {
-    pluginLog('给所有渲染进程发送消息')
-    pluginLog('所有聊天窗口如下')
-    console.log(chatWindows)
-    for (const window of chatWindows) {
-        if (window.isDestroyed()) continue;
-        window.webContents.send(message, args);
+  pluginLog("主进程广播消息到所有聊天窗口");
+  for (const win of chatWindows) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send(message, args);
+    } catch (e) {
+      // 静默失败，避免中断
     }
+  }
 }
 
 function onLoad() {
-    pluginLog("启动！")
+  pluginLog("grab_redbag 插件启动");
 
-    ipcMain.handle("LiteLoader.grab_redbag.getMenuHTML", () => fs.readFileSync(path.join(config.pluginPath, 'src/pluginMenu.html'), 'utf-8'))
-    ipcMain.handle("LiteLoader.grab_redbag.getConfig", () => Config.getConfig())
-    ipcMain.handle("LiteLoader.grab_redbag.setConfig", async (event, newConfig) => Config.setConfig(newConfig))//更新配置，并且返回新的配置
-    ipcMain.on("LiteLoader.grab_redbag.sendMsgToChatWindows", (_, message, args) => {
-        pluginLog('主进程准备处理sendMsgToChatWindows')
-        pluginLog(_, message, args)
-        sendMsgToChatWindows(message, args)
-    })
-    ipcMain.handle("LiteLoader.grab_redbag.addTotalRedBagNum", (_, num) => {
-        Config.setConfig({totalRedBagNum: config.totalRedBagNum + num})
-    })
-    ipcMain.handle("LiteLoader.grab_redbag.addTotalAmount", (_, amount) => {
-        Config.setConfig({totalAmount:config.totalAmount+amount})
-    })
+  // 菜单 / 配置
+  ipcMain.handle(
+    "LiteLoader.grab_redbag.getMenuHTML",
+    () => fs.readFileSync(path.join(pluginPath, "src/pluginMenu.html"), "utf-8")
+  );
+  ipcMain.handle("LiteLoader.grab_redbag.getConfig", () => Config.getConfig());
+  ipcMain.handle("LiteLoader.grab_redbag.setConfig", async (_event, newConfig) => {
+    return Config.setConfig(newConfig);
+  });
 
-    //设置配置
-    Config.initConfig(pluginPath, configPath)
+  // 业务统计
+  ipcMain.handle("LiteLoader.grab_redbag.addTotalRedBagNum", (_event, num) => {
+    Config.setConfig({ totalRedBagNum: config.totalRedBagNum + num });
+  });
+  ipcMain.handle("LiteLoader.grab_redbag.addTotalAmount", (_event, amount) => {
+    Config.setConfig({ totalAmount: config.totalAmount + amount });
+  });
+
+  // 群发消息到各聊天窗口（渲染层触发）
+  ipcMain.on("LiteLoader.grab_redbag.sendMsgToChatWindows", (_event, message, args) => {
+    pluginLog("主进程准备处理 sendMsgToChatWindows");
+    sendMsgToChatWindows(message, args);
+  });
+
+  // 初始化配置
+  Config.initConfig(pluginPath, configPath);
 }
-

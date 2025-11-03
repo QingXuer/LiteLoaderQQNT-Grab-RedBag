@@ -1,102 +1,148 @@
-// 运行在 Electron 渲染进程 下的页面脚本
-import {pluginLog} from "./utils/frontLogUtils.js";
-import {SettingListeners} from "./utils/SettingListeners.js";
-import {grabRedBag} from "./utils/grabRedBag.js";
+// 运行在 Electron 渲染进程 下的页面脚本（仅新版 RM_IPC）
+import { pluginLog } from "./utils/frontLogUtils.js";
+import { SettingListeners } from "./utils/SettingListeners.js";
+import { grabRedBag } from "./utils/grabRedBag.js";
 
-const grAPI = window.grab_redbag
-let grabRedBagListener = undefined//保存监听器
-let hasActived = false
-await onLoad();//注入
+const grAPI = window.grab_redbag;
 
-// 打开设置界面时触发
-export const onSettingWindowCreated = async view => {
-    // view 为 Element 对象，修改将同步到插件设置界面
-    try {
-        //整个插件主菜单
-        const parser = new DOMParser()
-        const settingHTML = parser.parseFromString(await grAPI.getMenuHTML(), "text/html").querySelector(".config-menu")
+// ============ 新版 IPC 监听通道 ============
+const CHANNEL_RECV   = "nodeIKernelMsgListener/onRecvMsg";                 // 主消息通道
+const CHANNEL_RECENT = "nodeIKernelRecentContactListener/onRecentContactChanged"; // 最近会话通道（备用）
+let listeners = [];
+let hasActived = false;
 
-        const myListener = new SettingListeners(settingHTML)
-        await myListener.onLoad()
-        view.appendChild(settingHTML);
+await onLoad();
 
-    } catch (e) {
-        setInterval(() => {//防止调试未打开就已经输出，导致捕获不到错误
-            console.log(e)
-        }, 1000)
-    }
+// ============ 打开设置界面时触发 ============
+export const onSettingWindowCreated = async (view) => {
+  try {
+    const parser = new DOMParser();
+    const settingHTML = parser
+      .parseFromString(await grAPI.getMenuHTML(), "text/html")
+      .querySelector(".config-menu");
+
+    const myListener = new SettingListeners(settingHTML);
+    await myListener.onLoad();
+    view.appendChild(settingHTML);
+  } catch (e) {
+    console.error("[GrabRedBag] 设置界面加载错误:", e);
+  }
+};
+
+// ============ 统一管理监听器 ============
+function unsubscribeAll() {
+  if (!listeners.length) return;
+  for (const l of listeners) {
+    try { grAPI.unsubscribeEvent(l); } catch {}
+  }
+  listeners = [];
 }
 
+const DEBUG = 0; // ← 调试开关：1=开启日志，0=关闭日志
 
-async function onLoad() {
-    if (location.hash === "#/blank") {
-        navigation.addEventListener("navigatesuccess", onHashUpdate, {once: true});
-    } else {
-        await onHashUpdate();
+function subscribeAll() {
+  const recvListener = grAPI.subscribeEvent(CHANNEL_RECV, (payload) => {
+    if (DEBUG) {
+      try {
+        console.log("[GRB:RECV][onRecvMsg] recv payload =", payload);
+      } catch (e) {
+        console.log("[GRB:RECV][onRecvMsg] recv payload (stringified failed)");
+      }
+      console.log("[GRB:RECV] -> call grabRedBag()");
     }
+    grabRedBag(payload);
+  });
 
-    pluginLog('onLoad函数加载完成')
+  const recentListener = grAPI.subscribeEvent(CHANNEL_RECENT, (payload) => {
+    if (DEBUG) {
+      try {
+        console.log("[GRB:RECV][onRecentContactChanged] payload =", payload);
+      } catch (e) {
+        console.log("[GRB:RECV][onRecentContactChanged] payload (stringified failed)");
+      }
+      console.log("[GRB:RECV] (recent) -> call grabRedBag()");
+    }
+    grabRedBag(payload);
+  });
+
+  listeners.push(recvListener, recentListener);
+  if (DEBUG) console.log("[GrabRedBag] 已启动红包监听（onRecvMsg / onRecentContactChanged）");
+}
+
+// ============ 初始化加载 ============
+async function onLoad() {
+  if (location.hash === "#/blank") {
+    navigation.addEventListener("navigatesuccess", onHashUpdate, { once: true });
+  } else {
+    await onHashUpdate();
+  }
+  pluginLog("[GrabRedBag] onLoad 完成");
 }
 
 async function onHashUpdate() {
-    const hash = location.hash;
-    if (window.webContentId !== 2) return//尝试修复多次提醒消息的bug。只在QQ主界面注册事件。
-    if (hash === '#/blank') return
-    if (!(hash.includes("#/main/message") || hash.includes("#/chat"))) return;//不符合条件直接返回
+  const hash = location.hash;
+  // 你的环境条件若需要可保留；此处不做改动。
+  // if ((window.webContentId ?? window.webContentsId) !== 2) return;
+  if (hash === "#/blank") return;
+  if (!(hash.includes("#/main/message") || hash.includes("#/chat"))) return;
 
-    grAPI.addEventListener('LiteLoader.grab_redbag.unSubscribeListener', () => grAPI.unsubscribeEvent(grabRedBagListener)) //收到取消订阅消息，取消订阅红包消息
-    grAPI.addEventListener('LiteLoader.grab_redbag.subscribeListener', () => {
-        pluginLog("渲染进程收到请求，准备监听红包事件。")
-        grabRedBagListener = grAPI.subscribeEvent("nodeIKernelMsgListener/onRecvActiveMsg", (payload) => grabRedBag(payload))
-    })//添加订阅
+  // 外部控制订阅开关
+  grAPI.addEventListener("LiteLoader.grab_redbag.unSubscribeListener", () => {
+    unsubscribeAll();
+    pluginLog("[GrabRedBag] 收到指令 -> 已关闭红包监听");
+  });
 
-    pluginLog('执行onHashUpdate')
-    //"nodeIKernelMsgListener/onAddSendMsg"
-    //"nodeIKernelMsgListener/onRecvMsg"
-    try {
-        if (!(await grAPI.getConfig()).isActive) {
-            pluginLog("功能未开启，不监听抢红包事件")
-            return
-        }
-        grabRedBagListener = grAPI.subscribeEvent("nodeIKernelMsgListener/onRecvActiveMsg", (payload) => grabRedBag(payload))
-        pluginLog("事件监听成功")
+  grAPI.addEventListener("LiteLoader.grab_redbag.subscribeListener", () => {
+    unsubscribeAll();
+    subscribeAll();
+    pluginLog("[GrabRedBag] 收到指令 -> 启用红包监听");
+  });
 
-        //尝试获取群列表
+  pluginLog("[GrabRedBag] onHashUpdate 执行");
 
-        //有人加群的时候会触发onGroupListUpdate
-        grAPI.subscribeEvent("onGroupListUpdate", async (payload) => {
-                //pluginLog("监听到onGroupListUpdate")
-                //console.log(payload)
-                if (hasActived) return
-                hasActived = true;
-                if ((await grAPI.getConfig()).isActiveAllGroups) {
-                    pluginLog("激活所有聊天")
-                    await activeAllGroups(payload.groupList)
-                }
-            }
-        )
+  try {
+    const cfg = await grAPI.getConfig();
+    console.log("[GRB:RECV] current config =", cfg);
 
-        const result = await grAPI.invokeNative('ns-NodeStoreApi', "getGroupList", false)
-        console.log(result)
-
-    } catch (e) {
-        console.log(e)
+    if (!cfg.isActive) {
+      pluginLog("[GrabRedBag] 功能未启用，不监听红包事件");
+      unsubscribeAll();
+      return;
     }
+
+    unsubscribeAll();
+    subscribeAll();
+
+    // 加群事件：激活全部群聊
+    grAPI.subscribeEvent("onGroupListUpdate", async (payload) => {
+      if (hasActived) return;
+      hasActived = true;
+      const conf = await grAPI.getConfig();
+      if (conf.isActiveAllGroups) {
+        pluginLog("[GrabRedBag] 检测到新群列表，激活所有群聊");
+        await activeAllGroups(payload.groupList);
+      }
+    });
+
+    // 获取群列表
+    const result = await grAPI.invokeNative("ns-NodeStoreApi", "getGroupList", false);
+    console.log("[GRB:RECV] getGroupList =", result);
+
+  } catch (e) {
+    console.error("[GrabRedBag] onHashUpdate 错误:", e);
+  }
 }
 
-//激活所有的群聊消息
+// ============ 激活所有群聊 ============
 async function activeAllGroups(groupList) {
-    for (const group of groupList) {
-        //应该对每个group调用active方法
-        const result = await grAPI.invokeNative("ns-ntApi", "nodeIKernelMsgService/getAioFirstViewLatestMsgsAndAddActiveChat", false, {
-            "peer": {
-                "chatType": 2,
-                "peerUid": group.groupCode,
-                "guildId": ""
-            }, "cnt": 0
-        }, null)
-        // pluginLog(`激活群聊"${group.groupName}"的消息，结果为`)
-        // console.log(result)
-    }
+  for (const group of groupList) {
+    await grAPI.invokeNative(
+      "ns-ntApi",
+      "nodeIKernelMsgService/getAioFirstViewLatestMsgsAndAddActiveChat",
+      false,
+      { peer: { chatType: 2, peerUid: group.groupCode, guildId: "" }, cnt: 0 },
+      null
+    );
+    pluginLog(`[GrabRedBag] 已激活群聊: ${group.groupName}(${group.groupCode})`);
+  }
 }
-
