@@ -189,8 +189,10 @@ export class SettingListeners {
         const input = this.document.querySelector('#gr-Send2Who-input')
         const config = await grAPI.getConfig()
 
+        // 初始化下拉选择器
         typeSelector.value = config.Send2WhoType || "0"
 
+        // 根据类型控制输入框显隐和placeholder
         const updateInputState = (type) => {
             if (type === "0" || type === "1") {
                 input.style.display = "none"
@@ -200,18 +202,23 @@ export class SettingListeners {
             }
         }
         updateInputState(typeSelector.value)
+
+        // 初始化输入框值
         input.value = config.Send2Who.join(",")
 
+        // 下拉切换事件
         typeSelector.addEventListener('change', async event => {
             const type = event.target.value
             updateInputState(type)
             await grAPI.setConfig({Send2WhoType: type})
+            // 切换到自己/我的手机时清空号码
             if (type === "0" || type === "1") {
                 input.value = ""
                 await grAPI.setConfig({Send2Who: []})
             }
         })
 
+        // 输入框事件
         input.addEventListener('change', async event => {
             await grAPI.setConfig({Send2Who: event.target.value.split(',').filter(item => item.trim() !== "")})
         })
