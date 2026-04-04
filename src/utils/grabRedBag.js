@@ -1,312 +1,532 @@
-import { pluginLog } from "./frontLogUtils.js";
+import {pluginLog} from "./frontLogUtils.js";
 
-const API = window.grab_redbag;
+const pluginAPI = window.grab_redbag
+const grabedArray = []
+let antiDetectGroups = []//暂时停止监听的群。
+const antiDetectTime = 300000//默认暂停五分钟
 
-// ============= 小工具 =============
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const within = (ms, tag, p) =>
-  Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error(`TIMEOUT:${tag}`)),ms))])
-    .then(res => ({ok:true,res})).catch(err=>({ok:false,err}));
+// 缓存 authData，避免每次都遍历搜索
+let cachedAuthData = null;
 
-const toBytes = (obj) => {
-  if (!obj) return null;
-  if (typeof obj === "string") return obj;
-  if (Array.isArray(obj)) return Uint8Array.from(obj);
-  if (typeof obj === "object") {
-    const ks = Object.keys(obj).filter(k=>/^\d+$/.test(k)).sort((a,b)=>a-b);
-    if (!ks.length) return obj;
-    return Uint8Array.from(ks.map(k=>obj[k]));
-  }
-  return obj;
-};
-
-const inMuteRange = (start, end) => {
-  const now = new Date();
-  const cur = now.getHours()*60 + now.getMinutes();
-  const [sh,sm] = start.split(":").map(Number); const [eh,em] = end.split(":").map(Number);
-  const s = sh*60+sm, e = eh*60+em;
-  return s<e ? (cur>=s && cur<e) : (cur>=s || cur<e);
-};
-
-const looksLikeMsg = (m)=> m && typeof m==="object" && Array.isArray(m.elements) && ("msgSeq" in m) && ("peerUid" in m) && ("chatType" in m);
-
-const DEFAULT_CFG = {
-  blockType: "0",
-  listenKeyWords: [], listenGroups: [], listenQQs: [],
-  avoidKeyWords: [],  avoidGroups:  [], avoidQQs:  [],
-  notificationonly: false,
-  stopGrabByTime: false, stopGrabStartTime: "00:00", stopGrabEndTime: "00:00",
-  antiDetect: false, useSelfNotice: false,
-  useRandomDelay: false, delayLowerBound: 0, delayUpperBound: 0,
-  delayLowerBoundForSend: 0, delayUpperBoundForSend: 0,
-  thanksMsgs: [], Send2Who: [],
-  receiveMsg: "[Grab RedBag]来自群\"%peerName%(%peerUid%)\"成员:\"%senderName%(%sendUin%)\" 收到金额 %amount% 元",
-};
-
-async function getConfigSafe() {
-  const r = await within(800, "getConfig", Promise.resolve().then(()=>API.getConfig()));
-  if (!r.ok) return {...DEFAULT_CFG};
-  return {...DEFAULT_CFG, ...(r.res||{})};
-}
-
-// ====== 自 UIN：先读缓存；必要时快速预热一次 ======
-//目前无法读取自己uin故失效
-function readSelfCache() {
-  const c = (typeof window !== "undefined" && window.__GRB_SELF__) || {};
-  if (c?.uin && c.uin !== "0") return { uin: String(c.uin), uid: c.uid || "", nickName: c.nickName || "", from: c.from || "" };
-  try {
-    const auth = app?.__vue_app__?.config?.globalProperties?.$store?.state?.common_Auth?.authData;
-    if (auth?.uin) return { uin:String(auth.uin), uid: auth.uid, nickName: auth.nickName, from:"vue-store-direct" };
-  } catch {}
-  return null;
-}
-
-async function warmUpSelfOnce() {
-  if (!API || !API.invokeNative) return null;
-  const calls = [
-    ['nodeIKernelLoginService/getCurrentUin', {}],
-    ['nodeIKernelLoginService/getLoginInfo', {}],
-    ['nodeIKernelLoginService/getUinLoginInfo', {}],
-    ['nodeIKernelProfileService/getSelfProfileSimple', {}],
-    ['nodeIKernelProfileService/getSelfInfo', {}],
-    ['nodeIKernelAccountService/getAccountInfo', {}],
-    ['nodeIKernelFriendService/getSelfInfo', {}],
-  ];
-  for (const [fn, body] of calls) {
-    const r = await within(900, fn, API.invokeNative('ns-ntApi', fn, false, body));
-    if (r.ok) {
-      const data = r.res || {};
-      const cand = data.loginInfo || data.profile || data.accountInfo || data.selfInfo || data;
-      const uin = cand?.uin && String(cand.uin);
-      if (uin && uin !== "0") {
-        window.__GRB_SELF__ = window.__GRB_SELF__ || {};
-        window.__GRB_SELF__.uin = uin;
-        window.__GRB_SELF__.uid = cand.uid || cand.tinyId || "";
-        window.__GRB_SELF__.nickName = cand.nickName || cand.nickname || "";
-        window.__GRB_SELF__.from = `warm:${fn}`;
-        return { uin: window.__GRB_SELF__.uin, uid: window.__GRB_SELF__.uid, nickName: window.__GRB_SELF__.nickName };
-      }
+/**
+ * 获取 authData，带缓存机制
+ * 第一次调用时会遍历搜索，之后直接返回缓存
+ */
+function getAuthData() {
+    if (cachedAuthData) {
+        return cachedAuthData;
     }
-  }
-  return null;
-}
-
-// ====== 反检测状态 ======
-const grabbedBills = new Set();
-let antiDetectGroups = [];
-const antiDetectTime = 300000;
-
-// ============= 主入口 ============
-export async function grabRedBag(payload) {
-  try {
-    const msg = await normalize(payload);
-    if (!msg) return;
-
-    const el = (msg.elements||[]).find(x => x && x.elementType===9 && x.walletElement);
-    if (!el) return;
-
-    const w = el.walletElement;
-    pluginLog("收到了红包消息！！！");
-
-    const billNo = w.billNo || `${msg.msgSeq}:${w.authkey||""}`; // 仍保留去重
-    if (grabbedBills.has(billNo)) return;
-    grabbedBills.add(billNo);
-
-    const chatType  = msg.chatType;
-    const peerUid   = msg.peerUid;
-    const peerName  = msg.peerName || "";
-    const msgSeq    = String(msg.msgSeq || "");
-    const sendUin   = msg.senderUin || "";
-    const senderName= msg.sendRemarkName || msg.sendMemberName || msg.sendNickName || "";
-
-    const pcBody    = toBytes(w.pcBody);
-    const index     = toBytes(w.stringIndex);
-    const title     = (w.receiver?.title || w.title || "QQ红包").toString().trim() || "QQ红包";
-    const redChannel= w.redChannel;
-
-    const cfg = await getConfigSafe();
-    if (cfg.stopGrabByTime && inMuteRange(cfg.stopGrabStartTime, cfg.stopGrabEndTime)) return;
-    if (antiDetectGroups.includes(peerUid)) return;
-
-    // 白/黑名单
-    switch (cfg.blockType) {
-      case "1": {
-        const passKW = (cfg.listenKeyWords.length===0) || cfg.listenKeyWords.some(wd=>title.includes(wd));
-        const passG  = (cfg.listenGroups.length===0)   || cfg.listenGroups.includes(peerUid);
-        const passQ  = (cfg.listenQQs.length===0)      || cfg.listenQQs.includes(sendUin);
-        if (!(passKW && passG && passQ)) return;
-        break;
-      }
-      case "2": {
-        const hit = cfg.avoidKeyWords.some(wd=>title.includes(wd)) || cfg.avoidGroups.includes(peerUid) || cfg.avoidQQs.includes(sendUin);
-        if (hit) return;
-        break;
-      }
-    }
-
-    // ===== 只提醒不抢：提到最前，且优先使用 Send2Who，无需依赖 self =====
-    //目前无法读取自己uin故失效
-    //即使强制设定uin但无法发消息，故发消息实现已失效
-    if (cfg.notificationonly) {
-      let target = "";
-      let ctype = 1; // 默认 1=私聊/好友
-
-      if (Array.isArray(cfg.Send2Who) && cfg.Send2Who.length > 0) {
-        // 有显式目标：1=私聊(8?2?) 兼容原逻辑
-        target = cfg.Send2Who[0];
-        ctype  = (cfg.Send2Who[0] === "1") ? 8 : 2; // 复用你原有的映射
-      } else {
-        // 无显式目标：需要 self 才能发给自己
-        let self = readSelfCache();
-        if (!self?.uin) self = await warmUpSelfOnce();
-        if (!self?.uin) {
-          pluginLog("只提醒模式：未配置 Send2Who，且自 UIN 未就绪，已跳过发送提醒");
-          return;
+    
+    // 先尝试旧版路径
+    try {
+        const oldPath = app?.__vue_app__?.config?.globalProperties?.$store?.state?.common_Auth?.authData;
+        if (oldPath && oldPath.uin) {
+            console.log("[Grab-RedBag] 使用旧版路径获取 authData 成功");
+            cachedAuthData = oldPath;
+            return cachedAuthData;
         }
-        target = self.uid || self.uin || "";
-        ctype  = 1;
-      }
+    } catch (e) {
+        console.log("[Grab-RedBag] 旧版路径获取 authData 失败，尝试搜索...");
+    }
+    
+    // 旧版路径失败，使用搜索
+    const result = findShortestPathAndValue(app, "authData");
+    if (result && result.value && result.value.uin) {
+        console.log("[Grab-RedBag] 搜索到 authData，路径:", result.path);
+        cachedAuthData = result.value;
+        return cachedAuthData;
+    }
+    
+    console.error("[Grab-RedBag] 无法获取 authData！");
+    return null;
+}
 
-      await within(1200, "notify", API.invokeNative('ns-ntApi','nodeIKernelMsgService/sendMsg',false,{
-        msgId:"0",
-        peer:{ chatType:ctype, peerUid:target, guildId:"" },
-        msgElements:[{ elementType:1, elementId:"", textElement:{ content:`[Grab RedBag]发现群"${peerName}(${peerUid})"成员"${senderName}(${sendUin})"红包！`, atType:0, atUid:"", atTinyId:"", atNtUid:"" } } ],
-        msgAttributeInfos:new Map()
-      }));
-      return;
+/**
+ * [V4 优化版] - 查找对象中某个 key 的最短可访问路径及其对应的值
+ *
+ * 该算法使用广度优先搜索 (BFS) 来保证找到的路径层级最浅。
+ * 它会忽略 Vue 内部的响应式依赖属性（如 dep, __v_raw, _value 等），
+ * 从而避免产生超长的无效路径。
+ *
+ * @param {object} rootObject - 搜索的起始对象，例如 `app` 或 `window`。
+ * @param {string} targetKey - 要查找的属性名，例如 "authData"。
+ * @returns {{path: string, value: any}|null} - 返回一个包含最短路径和对应值的对象，如果找不到则返回 null。
+ */
+function findShortestPathAndValue(rootObject, targetKey) {
+    console.log(`[Grab-RedBag] 🚀 开始搜索 "${targetKey}" 的最短路径和值...`);
+
+    // 定义需要忽略的属性名
+    const ignoreProps = new Set([
+        'dep', '__v_raw', '__v_skip', '_value', '__ob__',
+        'prevDep', 'nextDep', 'prevSub', 'nextSub', 'deps', 'subs',
+        '__vueParentComponent', 'parent', 'provides'
+    ]);
+
+    // 使用广度优先搜索 (BFS)
+    const queue = [{obj: rootObject, path: 'app'}];
+    const visited = new Set();
+
+    visited.add(rootObject);
+
+    while (queue.length > 0) {
+        const {obj, path} = queue.shift();
+
+        // 检查当前对象是否直接包含目标 key
+        if (obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, targetKey)) {
+            const finalPath = `${path}.${targetKey}`;
+            const finalValue = obj[targetKey];
+
+            // 验证找到的值是否有效（对于 authData，需要有 uin 属性）
+            if (finalValue && (targetKey !== 'authData' || finalValue.uin)) {
+                console.log(`[Grab-RedBag] ✅ 成功! 找到最短路径: ${finalPath}`);
+                return { path: finalPath, value: finalValue };
+            }
+        }
+
+        // 将子属性加入队列
+        for (const prop in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, prop)) {
+                if (ignoreProps.has(prop)) {
+                    continue;
+                }
+
+                try {
+                    const childObj = obj[prop];
+                    if (childObj && typeof childObj === 'object' && !visited.has(childObj)) {
+                        visited.add(childObj);
+                        const newPath = Array.isArray(obj) ? `${path}[${prop}]` : `${path}.${prop}`;
+                        queue.push({obj: childObj, path: newPath});
+                    }
+                } catch (e) {
+                    // 忽略访问出错的属性
+                }
+            }
+        }
     }
 
-    // 随机延迟（抢包前）
-    if (cfg.useRandomDelay) {
-      const lb = parseInt(cfg.delayLowerBound)||0, ub = parseInt(cfg.delayUpperBound)||0;
-      const d  = Math.max(0, Math.floor(Math.random()*(ub-lb+1))+lb);
-      if (d) await sleep(d);
-      pluginLog("延迟",d,"秒")
+    console.log(`[Grab-RedBag] ❌ 搜索完成，未找到 "${targetKey}" 的可访问路径。`);
+    return null;
+}
+
+export async function grabRedBag(payload) {
+    //console.log("[Grab-RedBag] ========== grabRedBag 开始执行 ==========")
+    // pluginLog("下面是onRecvMsg的payload")
+    if (payload.msgList[0].peerUid === "934773893")
+        console.log(payload)
+    //console.log(payload)
+    let wallEl = null
+    for (const msgElement of payload.msgList[0].elements) {
+        if (msgElement.elementType === 9) {//说明是红包消息！
+            pluginLog("收到了红包消息！！！")
+            wallEl = msgElement.walletElement
+            console.log(msgElement.walletElement)//打印红包内容
+            console.log(payload)
+            break
+        }
+    }
+    if (!wallEl) {
+        //console.log("[Grab-RedBag] wallEl 为空，不是红包消息，退出")
+        return;
+    }
+    if (grabedArray.includes(wallEl.billNo)) {
+        console.log("[Grab-RedBag] 该红包已处理过，billNo:", wallEl.billNo)
+        return;
+    }
+    grabedArray.push(wallEl.billNo)//这里使用数组来避免重复播报
+    console.log("[Grab-RedBag] 新红包，billNo:", wallEl.billNo)
+
+    const authData = getAuthData();
+    if (!authData) {
+        console.error("[Grab-RedBag] 无法获取 authData，退出");
+        return;
+    }
+    console.log("[Grab-RedBag] authData 获取成功，uin:", authData.uin);
+
+    //收红包必要的数据
+    const msgSeq = payload.msgList[0].msgSeq
+    const recvUin = authData.uin//自己的QQ号
+    const peerUid = payload.msgList[0].peerUid//发红包的对象的peerUid
+    const name = authData.nickName//应该是自己的名字
+    const sendUin = payload.msgList[0].senderUin//发送红包的QQ号
+    const senderName = payload.msgList[0].sendRemarkName || payload.msgList[0].sendMemberName || payload.msgList[0].sendNickName;//发送者的名字
+    const pcBody = wallEl.pcBody
+    const wishing = wallEl.receiver.title
+    const index = wallEl.stringIndex
+    const chatType = payload.msgList[0].chatType//聊天类型，1是私聊，2是群聊
+    const peerName = payload.msgList[0].peerName//群聊名字
+    const msgTime = payload.msgList[0].msgTime//信息的unix时间戳
+    const standardTime = new Date(msgTime* 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });//标准UTC+8时间
+    const title = wallEl.receiver.title
+    const redChannel = wallEl.redChannel
+    const config = await pluginAPI.getConfig()
+    // 根据 Send2WhoType 确定回馈消息发送目标
+    // 0=自己(私聊) 1=我的手机(设备) 2=QQ好友(私聊) 3=群聊
+    const send2WhoType = config.Send2WhoType || "0"
+    let IsGroup, receiver
+    switch (send2WhoType) {
+        case "1": // 我的手机
+            IsGroup = 8; receiver = authData.uid; break
+        case "2": // QQ好友
+            IsGroup = 1; receiver = config.Send2Who[0] || authData.uid; break
+        case "3": // 群聊
+            IsGroup = 2; receiver = config.Send2Who[0] || authData.uid; break
+        default:  // 0=自己
+            IsGroup = 1; receiver = authData.uid; break
     }
 
-    // 口令红包：先发口令
-    //失效
+
+    //先判断黑白名单的类型
+    console.log("[Grab-RedBag] 开始检查黑白名单，blockType:", config.blockType)
+    switch (config.blockType) {
+        case "0" :
+            console.log("[Grab-RedBag] 未启用黑白名单")
+            break;//说明未启用黑白名单
+
+        case "1": {//说明是白名单
+            const titleLower = title.toLowerCase()
+            const keyWordMatch = config.listenKeyWords.length === 0 || config.listenKeyWords.some(word => titleLower.includes(word.toLowerCase()))
+            const groupMatch = config.listenGroups.length === 0 || config.listenGroups.includes(peerUid)
+            const qqMatch = config.listenQQs.length === 0 || config.listenQQs.includes(sendUin)
+            console.log(`[Grab-RedBag] 白名单检查: title="${title}", keyWordMatch=${keyWordMatch}, groupMatch=${groupMatch}, qqMatch=${qqMatch}`)
+            if (!(keyWordMatch && groupMatch && qqMatch)) {
+                pluginLog("未同时满足关键字、白名单群和发送者条件，不抢红包")
+                console.log("[Grab-RedBag] 白名单检查未通过，退出")
+                if (config.notifyOnBlocked) {
+                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但未满足白名单条件，未领取。`)
+                }
+                return
+            }
+            console.log("[Grab-RedBag] 白名单检查通过")
+            break
+        }
+        case "2": {//说明是黑名单
+            const titleLower = title.toLowerCase()
+            const hitKeyWord = config.avoidKeyWords.some(word => titleLower.includes(word.toLowerCase()))
+            const hitGroup = config.avoidGroups.includes(peerUid)
+            const hitQQ = config.avoidQQs.includes(sendUin)
+            console.log(`[Grab-RedBag] 黑名单检查: title="${title}", hitKeyWord=${hitKeyWord}, hitGroup=${hitGroup}, hitQQ=${hitQQ}`)
+            if (hitKeyWord || hitGroup || hitQQ) {
+                pluginLog("检测到黑名单关键字、在黑名单群内或发送者在黑名单内，不抢红包")
+                console.log("[Grab-RedBag] 黑名单检查命中，退出")
+                if (config.notifyOnBlocked) {
+                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但命中黑名单，未领取。`)
+                }
+                return
+            }
+            console.log("[Grab-RedBag] 黑名单检查通过")
+            break
+        }
+    }
+
+
+    if (config.notificationonly) {
+        pluginLog("检测到已开启仅通知模式")
+        console.log("[Grab-RedBag] 仅通知模式，发送通知后退出")
+        await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
+            "msgId": "0",
+            "peer": {"chatType": IsGroup, "peerUid": receiver, "guildId": ""},
+            "msgElements": [{
+                "elementType": 1,
+                "elementId": "",
+                "textElement": {
+                    "content": `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包`,
+                    "atType": 0,
+                    "atUid": "",
+                    "atTinyId": "",
+                    "atNtUid": ""
+                }
+            }],
+            "msgAttributeInfos": new Map()
+        }, null)
+        return
+    }
+
+    //还要检测是否开启特定时段禁止抢红包功能。
+    if (config.stopGrabByTime) {
+        //检测时间段
+        console.log("[Grab-RedBag] 检查时间段限制，开始:", config.stopGrabStartTime, "结束:", config.stopGrabEndTime)
+        if (isCurrentTimeInRange(config.stopGrabStartTime, config.stopGrabEndTime)) {
+            console.log("[Grab-RedBag] 当前在禁止时间段内，退出")
+            if (config.notifyOnBlocked) {
+                await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但当前处于禁抢时段，未领取。`)
+            }
+            return
+        }
+    }
+    //检测是否在暂时监听名单内
+    if (antiDetectGroups.includes(peerUid)) {
+        pluginLog("当前群在暂停收红包的群内！不抢红包！")
+        console.log("[Grab-RedBag] 群在 antiDetectGroups 中，退出")
+        if (config.notifyOnBlocked) {
+            await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但该群因一分钱检测暂停抢红包，未领取。`)
+        }
+        return
+    }
+
+    //检测是否抢自己的红包
+    if (config.antiMyself && sendUin == recvUin) {
+        pluginLog("已启用不抢自己红包！该红包是自己发送的不抢！")
+        if (config.notifyOnBlocked) {
+            await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但因启用不抢自己红包，未领取。`)
+        }
+        return
+    }
+
+    //下面准备抢红包
+    pluginLog("准备抢红包")
+    console.log("[Grab-RedBag] ===== 准备抢红包 =====")
+    console.log("[Grab-RedBag] chatType:", chatType, "peerUid:", peerUid, "msgSeq:", msgSeq)
+
+    let randomDelay = 0;          // 抢红包延迟
+    let randomDelayForSend = 0;   // 发送回复延迟
+
+    // 1. 计算抢红包延迟
+    if (config.useRandomDelay) {
+        const lowerBound = parseInt(config.delayLowerBound) || 0;
+        const upperBound = parseInt(config.delayUpperBound) || 0;
+        randomDelay = upperBound > lowerBound
+            ? Math.floor(Math.random() * (upperBound - lowerBound + 1)) + lowerBound
+            : lowerBound;
+    } else {
+        // 未启用随机延迟时，使用下限作为固定延迟
+        randomDelay = parseInt(config.delayLowerBound) || 1000;
+    }
+
+    // 2. 计算发送回复延迟
+    if (config.useRandomDelayForSend) {
+        const lowerBoundForSend = parseInt(config.delayLowerBoundForSend) || 0;
+        const upperBoundForSend = parseInt(config.delayUpperBoundForSend) || 0;
+        randomDelayForSend = upperBoundForSend > lowerBoundForSend
+            ? Math.floor(Math.random() * (upperBoundForSend - lowerBoundForSend + 1)) + lowerBoundForSend
+            : lowerBoundForSend;
+    } else {
+        // 未启用随机延迟时，使用下限作为固定延迟
+        randomDelayForSend = parseInt(config.delayLowerBoundForSend) || 6000;
+    }
+
+    pluginLog("抢红包延迟 " + randomDelay + "ms")
+    await sleep(randomDelay)
+    // 注意：randomDelayForSend 的延迟在实际发送消息前使用（后续的 sleep(randomDelayForSend)）
+
     if (redChannel === 32) {
-      await within(1500, "send command", API.invokeNative('ns-ntApi','nodeIKernelMsgService/sendMsg',false,{
-        msgId:"0",
-        peer:{ chatType, peerUid, guildId:"" },
-        msgElements:[{ elementType:1, elementId:"", textElement:{ content:title, atType:0, atUid:"", atTinyId:"", atNtUid:"" } } ],
-        msgAttributeInfos:new Map()
-      }));
+        //说明是口令红包，要输出口令
+        console.log("[Grab-RedBag] 口令红包，口令:", title)
+        const result = await pluginAPI.invokeNative('ntApi', 'nodeIKernelMsgService/sendMsg', false, {
+            "msgId": "0",
+            "peer": {
+                "chatType": chatType,
+                "peerUid": peerUid,
+                "guildId": ""
+            },
+            "msgElements": [
+                {
+                    "elementType": 1,
+                    "elementId": "",
+                    "textElement": {
+                        "content": title,
+                        "atType": 0,
+                        "atUid": "",
+                        "atTinyId": "",
+                        "atNtUid": ""
+                    }
+                }
+            ],
+            "msgAttributeInfos": new Map(),
+        })
+        //这里要做校验，如果消息发送失败了，那就得取消抢红包，以避免被禁言了的情况下抢到口令红包的情况。
+        pluginLog("发送口令红包的口令，下面是发送口令回调结果")
+        console.log(JSON.stringify(result, null, null))
+        //如果口令发送失败，比如被禁言，就不抢红包了
+        if (result.result !== 0 || result.errMsg !== "") {
+            console.log("[Grab-RedBag] 口令发送失败，退出")
+            return
+        }
+        console.log("[Grab-RedBag] 口令发送成功")
     }
 
-    // === 抢包分支才强制确保 self ===
-    let self = readSelfCache();
-    if (!self?.uin) self = await warmUpSelfOnce();
-    if (!self?.uin) {
-      pluginLog("自 UIN 未就绪，已跳过一次抢包");
-      return;
-    }
-
-    // === 发起抢包 ===
-    //失效
-    const req = {
-      grabRedBagReq: {
-        recvUin: String(self.uin),
+    console.log("[Grab-RedBag] 调用 grabRedBag API，参数:", {
+        recvUin: chatType === 1 ? recvUin : peerUid,
         recvType: chatType,
         peerUid,
-        name: self.nickName || "",
+        name,
         pcBody,
-        wishing: title || "QQ红包",
-        msgSeq: String(msgSeq),
+        wishing,
+        msgSeq,
         index
-      }
-    };
-
-    const grab = await within(5000, "grabRedBag",
-      API.invokeNative('ns-ntApi', "nodeIKernelMsgService/grabRedBag", false, req, {timeout:6000})
-    );
-    if (!grab.ok) return;
-    const rsp = grab.res?.grabRedBagRsp;
-
-    // 自己通知
-    //失效
-    if (cfg.useSelfNotice) {
-      const target = (cfg.Send2Who.length===0) ? (self.uid || self.uin || "") : cfg.Send2Who[0];
-      const ctype  = (cfg.Send2Who.length===0) ? 1 : (cfg.Send2Who[0]==="1" ? 8 : 2);
-      if (rsp?.recvdOrder?.amount === "0") {
-        await within(1200,"selfNotice-fail", API.invokeNative('ns-ntApi','nodeIKernelMsgService/sendMsg',false,{
-          msgId:"0",
-          peer:{ chatType:ctype, peerUid:target, guildId:"" },
-          msgElements:[{ elementType:1, elementId:"", textElement:{ content:`[Grab RedBag] 抢"${peerName}(${peerUid})"成员"${senderName}(${sendUin})"红包失败：已被领完`, atType:0, atUid:"", atTinyId:"", atNtUid:"" } } ],
-          msgAttributeInfos:new Map()
-        }));
-      } else {
-        const amount = (parseInt(rsp?.recvdOrder?.amount||"0")||0)/100;
-        if (amount===0.01 && cfg.antiDetect) {
-          antiDetectGroups.push(peerUid);
-          setTimeout(()=>{
-            antiDetectGroups = antiDetectGroups.filter(g=>g!==peerUid);
-            pluginLog(`恢复监听群 ${peerName}(${peerUid})`);
-          }, antiDetectTime);
+    })
+    const result = await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/grabRedBag", window.grab_redbag_webContentsId, {
+        "grabRedBagReq": {
+            "recvUin": chatType === 1 ? recvUin : peerUid,//私聊的话是自己Q号，群聊就是peerUid
+            "recvType": chatType,
+            "peerUid": peerUid,//对方的uid
+            "name": name,
+            "pcBody": pcBody,
+            "wishing": wishing,
+            "msgSeq": msgSeq,
+            "index": index
         }
-        const msgText = (cfg.receiveMsg||DEFAULT_CFG.receiveMsg)
-          .replace("%peerName%",peerName).replace("%peerUid%",peerUid)
-          .replace("%senderName%",senderName).replace("%sendUin%",sendUin||"")
-          .replace("%amount%", amount.toFixed(2));
-        await within(1200,"selfNotice-ok", API.invokeNative('ns-ntApi','nodeIKernelMsgService/sendMsg',false,{
-          msgId:"0",
-          peer:{ chatType:ctype, peerUid:target, guildId:"" },
-          msgElements:[{ elementType:1, elementId:"", textElement:{ content: msgText, atType:0, atUid:"", atTinyId:"", atNtUid:"" } } ],
-          msgAttributeInfos:new Map()
-        }));
-      }
+    }, {"timeout": 5000})
+    pluginLog("抢红包结果为")
+    console.log("[Grab-RedBag] grabRedBag API 返回结果:")
+    console.log(result)
+    
+    if (!result) {
+        console.log("[Grab-RedBag] result 为空，API 调用可能失败")
+        return
+    }
+    if (!result.grabRedBagRsp) {
+        console.log("[Grab-RedBag] result.grabRedBagRsp 为空，结构异常")
+        return
     }
 
-    if (rsp?.recvdOrder?.amount === "0") return;
+    //下面给自己发送提示消息
+    if (config.useSelfNotice) {
+        pluginLog("准备给自己发送消息")
+        console.log("[Grab-RedBag] useSelfNotice=true，准备发送通知")
+        if (result.grabRedBagRsp.recvdOrder.amount === "0") {
+            console.log("[Grab-RedBag] 红包金额为0，已被领完")
+            await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
+                "msgId": "0",
+                "peer": {"chatType": IsGroup, "peerUid": receiver, "guildId": ""},
+                "msgElements": [{
+                    "elementType": 1,
+                    "elementId": "",
+                    "textElement": {
+                        "content": `[Grab RedBag]抢来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包时失败！红包已被领完！`,
+                        "atType": 0,
+                        "atUid": "",
+                        "atTinyId": "",
+                        "atNtUid": ""
+                    }
+                }],
+                "msgAttributeInfos": new Map()
+            }, null)
+        } else {
+            //这里先准备好需要用到的数据
+            //peerName群名、peerUid群号、senderName发红包的人名、sendUin发红包的人的Q号
+            let amount = parseInt(result.grabRedBagRsp.recvdOrder.amount) / 100
+            console.log("[Grab-RedBag] 抢到红包金额:", amount, "元")
 
-    // 自动感谢
-    //失效
-    const cfgThanks = Array.isArray(cfg.thanksMsgs) && cfg.thanksMsgs.length>0;
-    if (cfgThanks) {
-      const selfUin = self?.uin && String(self.uin);
-      if (sendUin && selfUin && sendUin !== selfUin) {
-        if (cfg.useRandomDelay) {
-          const lb2= parseInt(cfg.delayLowerBoundForSend)||0, ub2=parseInt(cfg.delayUpperBoundForSend)||0;
-          const delaySend = Math.max(0, Math.floor(Math.random()*(ub2-lb2+1))+lb2);
-          if (delaySend) await sleep(delaySend);
+            //检测收到的是不是一分钱
+            if (amount === 0.01 && config.antiDetect) {
+                pluginLog("检测到一分钱红包！暂停该群抢红包5分钟！")
+                //暂时不抢这个群的红包
+                antiDetectGroups.push(peerUid)
+                //设置定时任务，定时删掉数组中的群
+                setTimeout(() => {
+                    antiDetectGroups = antiDetectGroups.filter(pausedGroupUid => pausedGroupUid !== peerUid);
+                    pluginLog(`恢复监听群${peerName}(${peerUid})`)
+                }, antiDetectTime)
+                if (config.notifyOnBlocked) {
+                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]抢到来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的一分钱红包，已暂停该群抢红包5分钟。`)
+                }
+            }
+
+            //定义需要发送的消息
+            const msg = config.receiveMsg.replace("%peerName%", peerName)
+                .replace("%peerUid%", peerUid)
+                .replace("%senderName%", senderName)
+                .replace("%sendUin%", sendUin)
+                .replace("%msgTime%", msgTime)
+                .replace("%standardTime%", standardTime)
+                .replace("%amount%", amount.toFixed(2))
+
+            await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
+                "msgId": "0",
+                "peer": {"chatType": IsGroup, "peerUid": receiver, "guildId": ""},
+                "msgElements": [{
+                    "elementType": 1,
+                    "elementId": "",
+                    "textElement": {
+                        "content": msg,
+                        "atType": 0,
+                        "atUid": "",
+                        "atTinyId": "",
+                        "atNtUid": ""
+                    }
+                }],
+                "msgAttributeInfos": new Map()
+            }, null)
         }
-        await within(1500,"sayThanks", API.invokeNative('ns-ntApi','nodeIKernelMsgService/sendMsg',false,{
-          msgId:"0",
-          peer:{ chatType, peerUid, guildId:"" },
-          msgElements:[{ elementType:1, elementId:"", textElement:{ content: cfg.thanksMsgs[Math.floor(Math.random()*cfg.thanksMsgs.length)], atType:0, atUid:"", atTinyId:"", atNtUid:"" } } ],
-          msgAttributeInfos:new Map()
-        }));
-      }
     }
 
-    // 统计
-    try { API.addTotalRedBagNum(1); } catch {}
-    try { API.addTotalAmount((parseInt(rsp?.recvdOrder?.amount||"0")||0)/100); } catch {}
+    //下面进行抢到红包的后续处理。没抢到则直接返回。
+    if (result.grabRedBagRsp.recvdOrder.amount === "0") {
+        console.log("[Grab-RedBag] 红包金额为0，后续处理跳过")
+        return
+    }
 
-  } catch {}
+    //下面给对方发送消息
+    if (config.thanksMsgs.length !== 0 && sendUin !== recvUin && msgTime * 1000 + randomDelayForSend > Date.now()) {//给对方发送消息。抢自己的红包不发送消息
+        pluginLog("准备给对方发送消息,延迟" + randomDelayForSend + "ms")
+        await sleep(randomDelayForSend)
+        console.log("[Grab-RedBag] 发送感谢消息")
+        await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
+            "msgId": "0",
+            "peer": {"chatType": chatType, "peerUid": peerUid, "guildId": ""},
+            "msgElements": [{
+                "elementType": 1,
+                "elementId": "",
+                "textElement": {
+                    "content": config.thanksMsgs[Math.floor(Math.random() * config.thanksMsgs.length)],//随机选一条发
+                    "atType": 0,
+                    "atUid": "",
+                    "atTinyId": "",
+                    "atNtUid": ""
+                }
+            }],
+            "msgAttributeInfos": new Map()
+        }, null)
+    }
+
+    //抢完红包之后，记录下当前已抢的红包数量和总额
+    pluginAPI.addTotalRedBagNum(1);
+    pluginAPI.addTotalAmount(parseInt(result.grabRedBagRsp.recvdOrder.amount) / 100);
+    console.log("[Grab-RedBag] ========== grabRedBag 执行完成 ==========")
 }
 
-// ============= 形状归一 =============
-async function normalize(payload){
-  if (looksLikeMsg(payload)) return payload;
-  const msgs = (Array.isArray(payload?.msgList) && payload.msgList) || (Array.isArray(payload?.msgs) && payload.msgs);
-  if (msgs && msgs.length){
-    const withRed = msgs.find(m => Array.isArray(m.elements) && m.elements.some(e=>e && e.elementType===9 && e.walletElement));
-    return withRed || msgs[0];
-  }
-  if (Array.isArray(payload?.changedRecentContactLists) && payload.changedRecentContactLists[0]?.changedList?.length){
-    const c = payload.changedRecentContactLists[0].changedList[0];
-    const shallow = { elements:null, msgSeq:c.msgSeq, peerUid:c.peerUid, chatType: c.chatType || c.sessionType, peerName:c.peerName,
-                      senderUin:c.senderUin, sendRemarkName:c.sendRemarkName, sendMemberName:c.sendMemberName, sendNickName:c.sendNickName, peerUin:c.peerUin };
-    try {
-      const r = await within(1200,"getMsgs", API.invokeNative('ns-ntApi','nodeIKernelMsgService/getMsgs',false,{
-        peer:{ chatType:shallow.chatType, peerUid:shallow.peerUid, guildId:"" },
-        msgSeqRange:{ begin:String(shallow.msgSeq), end:String(shallow.msgSeq) }
-      }));
-      if (r.ok && Array.isArray(r.res?.msgs) && r.res.msgs[0]?.elements) shallow.elements = r.res.msgs[0].elements;
-    } catch {}
-    return shallow;
-  }
-  return null;
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(() => resolve(), ms))
+}
+
+async function sendNotifyMsg(chatType, peerUid, content) {
+    await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
+        "msgId": "0",
+        "peer": {"chatType": chatType, "peerUid": peerUid, "guildId": ""},
+        "msgElements": [{
+            "elementType": 1,
+            "elementId": "",
+            "textElement": {
+                "content": content,
+                "atType": 0, "atUid": "", "atTinyId": "", "atNtUid": ""
+            }
+        }],
+        "msgAttributeInfos": new Map()
+    }, null)
+}
+
+function isCurrentTimeInRange(startTimeStr, endTimeStr) {
+    // 获取当前时间
+    const now = new Date();
+    const currentHours = now.getHours();
+    const currentMinutes = now.getMinutes();
+
+    // 将当前时间转换为分钟
+    const currentTimeInMinutes = currentHours * 60 + currentMinutes;
+
+    // 将开始和结束时间转换为分钟
+    const [startHours, startMinutes] = startTimeStr.split(':').map(Number);
+    const [endHours, endMinutes] = endTimeStr.split(':').map(Number);
+
+    const startTimeInMinutes = startHours * 60 + startMinutes;
+    const endTimeInMinutes = endHours * 60 + endMinutes;
+
+    // 处理跨午夜的情况
+    if (startTimeInMinutes < endTimeInMinutes) {
+        // 时间段不跨越午夜
+        return currentTimeInMinutes >= startTimeInMinutes && currentTimeInMinutes < endTimeInMinutes;
+    } else {
+        // 时间段跨越午夜
+        return currentTimeInMinutes >= startTimeInMinutes || currentTimeInMinutes < endTimeInMinutes;
+    }
 }

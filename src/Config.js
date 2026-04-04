@@ -7,11 +7,12 @@ class Config {
         isActive: true,//是否开启抢红包功能
         notificationonly: false,//是否仅通知
         antiDetect:false,//是否启用一分钱检测
+        antiMyself:false,//是否启用不抢自己红包
         useRandomDelay: false,//是否启用随机延迟
-        delayLowerBound: "",
+        delayLowerBound: "1000",
         delayUpperBound: "",
         useRandomDelayForSend: false,//是否启用随机延迟，给对方发送消息
-        delayLowerBoundForSend: "",
+        delayLowerBoundForSend: "6000",
         delayUpperBoundForSend: "",
         avoidKeyWords: [],//屏蔽词
         avoidGroups: [],//屏蔽群聊
@@ -19,7 +20,8 @@ class Config {
         listenKeyWords: [],//白名单词语
         listenGroups: [],//白名单群聊
         listenQQs: [],//白名单QQ
-        Send2Who: [],//回馈QQ群号
+        Send2Who: [],//回馈目标号码
+        Send2WhoType: "0",//回馈目标类型：0自己 1我的手机 2QQ好友 3群聊
         useSelfNotice: true,//抢到红包后是否给自己发送消息
         // isSendToPhone: false,//抢红包后是否发送到手机
         thanksMsgs: [],//抢到红包之后的感谢消息
@@ -30,7 +32,8 @@ class Config {
         stopGrabByTime:false,//根据时间停止抢红包
         stopGrabStartTime:"00:00",//暂停抢红包的开始时间
         stopGrabEndTime:"00:00",//暂停抢红包的结束时间
-        receiveMsg: "[Grab RedBag]收到来自群\"%peerName%(%peerUid%)\"成员:\"%senderName%(%sendUin%)\"发送的的红包%amount%元"
+        notifyOnBlocked: false,//黑白名单拦截时是否发送提醒
+        receiveMsg: "[Grab RedBag]收到来自群\"%peerName%(%peerUid%)\"成员:\"%senderName%(%sendUin%)\"在%standardTime%发送的红包%amount%元"
     }
 
     static initConfig(pluginPath, configPath) {
@@ -45,6 +48,9 @@ class Config {
             pluginLog('配置文件创建成功')
         }
         Object.assign(this.config, JSON.parse(fs.readFileSync(this.config.configPath, 'utf-8')))
+        // 防止文件中的旧路径覆盖正确路径
+        this.config.pluginPath = pluginPath
+        this.config.configPath = configPath
         pluginLog('当前的配置文件为')
         console.log(this.config)
         pluginLog('配置初始化完毕')
