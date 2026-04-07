@@ -457,7 +457,8 @@ export async function grabRedBag(payload) {
     }
 
     //下面给对方发送消息
-    if (config.thanksMsgs.length !== 0 && sendUin !== recvUin) {//给对方发送消息。抢自己的红包不发送消息
+    if (config.thanksMsgs.length !== 0 && sendUin !== recvUin && msgTime * 1000 + randomDelayForSend + 5000 > Date.now()) {//给对方发送消息。抢自己的红包不发送消息
+        pluginLog("准备给对方发送消息,延迟" + randomDelayForSend + "ms")
         await sleep(randomDelayForSend)
         console.log("[Grab-RedBag] 发送感谢消息")
         await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
