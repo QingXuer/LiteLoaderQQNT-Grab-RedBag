@@ -154,6 +154,8 @@ export async function grabRedBag(payload) {
     const index = wallEl.stringIndex
     const chatType = payload.msgList[0].chatType//聊天类型，1是私聊，2是群聊
     const peerName = payload.msgList[0].peerName//群聊名字
+    const msgTime = payload.msgList[0].msgTime//信息的unix时间戳
+    const standardTime = new Date(msgTime* 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });//标准UTC+8时间
     const title = wallEl.receiver.title
     const redChannel = wallEl.redChannel
     const config = await pluginAPI.getConfig()
@@ -190,7 +192,7 @@ export async function grabRedBag(payload) {
                 pluginLog("未同时满足关键字、白名单群和发送者条件，不抢红包")
                 console.log("[Grab-RedBag] 白名单检查未通过，退出")
                 if (config.notifyOnBlocked) {
-                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的红包，但未满足白名单条件，未领取。`)
+                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但未满足白名单条件，未领取。`)
                 }
                 return
             }
@@ -207,7 +209,7 @@ export async function grabRedBag(payload) {
                 pluginLog("检测到黑名单关键字、在黑名单群内或发送者在黑名单内，不抢红包")
                 console.log("[Grab-RedBag] 黑名单检查命中，退出")
                 if (config.notifyOnBlocked) {
-                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的红包，但命中黑名单，未领取。`)
+                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但命中黑名单，未领取。`)
                 }
                 return
             }
@@ -227,7 +229,7 @@ export async function grabRedBag(payload) {
                 "elementType": 1,
                 "elementId": "",
                 "textElement": {
-                    "content": `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的红包！`,
+                    "content": `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包`,
                     "atType": 0,
                     "atUid": "",
                     "atTinyId": "",
@@ -246,7 +248,7 @@ export async function grabRedBag(payload) {
         if (isCurrentTimeInRange(config.stopGrabStartTime, config.stopGrabEndTime)) {
             console.log("[Grab-RedBag] 当前在禁止时间段内，退出")
             if (config.notifyOnBlocked) {
-                await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的红包，但当前处于禁抢时段，未领取。`)
+                await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但当前处于禁抢时段，未领取。`)
             }
             return
         }
@@ -256,31 +258,55 @@ export async function grabRedBag(payload) {
         pluginLog("当前群在暂停收红包的群内！不抢红包！")
         console.log("[Grab-RedBag] 群在 antiDetectGroups 中，退出")
         if (config.notifyOnBlocked) {
-            await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的红包，但该群因一分钱检测暂停抢红包，未领取。`)
+            await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但该群因一分钱检测暂停抢红包，未领取。`)
         }
         return
     }
 
-    //下面准备发送收红包消息
+    //检测是否抢自己的红包
+    if (config.antiMyself && sendUin == recvUin) {
+        pluginLog("已启用不抢自己红包！该红包是自己发送的不抢！")
+        if (config.notifyOnBlocked) {
+            await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]发现来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包，但因启用不抢自己红包，未领取。`)
+        }
+        return
+    }
+
+    //下面准备抢红包
     pluginLog("准备抢红包")
     console.log("[Grab-RedBag] ===== 准备抢红包 =====")
     console.log("[Grab-RedBag] chatType:", chatType, "peerUid:", peerUid, "msgSeq:", msgSeq)
-    let randomDelayForSend = 0;
-    if (config.useRandomDelay) {
 
-        const lowerBound = parseInt(config.delayLowerBound) || 0
-        const upperBound = parseInt(config.delayUpperBound) || 0
-        const lowerBoundForSend = parseInt(config.delayLowerBoundForSend) || 0
-        const upperBoundForSend = parseInt(config.delayUpperBoundForSend) || 0
-        const randomDelay = upperBound > lowerBound
+    let randomDelay = 0;          // 抢红包延迟
+    let randomDelayForSend = 0;   // 发送回复延迟
+
+    // 1. 计算抢红包延迟
+    if (config.useRandomDelay) {
+        const lowerBound = parseInt(config.delayLowerBound) || 0;
+        const upperBound = parseInt(config.delayUpperBound) || 0;
+        randomDelay = upperBound > lowerBound
             ? Math.floor(Math.random() * (upperBound - lowerBound + 1)) + lowerBound
             : lowerBound;
+    } else {
+        // 未启用随机延迟时，使用下限作为固定延迟
+        randomDelay = parseInt(config.delayLowerBound) || 1000;
+    }
+
+    // 2. 计算发送回复延迟
+    if (config.useRandomDelayForSend) {
+        const lowerBoundForSend = parseInt(config.delayLowerBoundForSend) || 0;
+        const upperBoundForSend = parseInt(config.delayUpperBoundForSend) || 0;
         randomDelayForSend = upperBoundForSend > lowerBoundForSend
             ? Math.floor(Math.random() * (upperBoundForSend - lowerBoundForSend + 1)) + lowerBoundForSend
             : lowerBoundForSend;
-        pluginLog("等待随机时间" + randomDelay + "ms")
-        await sleep(randomDelay)
+    } else {
+        // 未启用随机延迟时，使用下限作为固定延迟
+        randomDelayForSend = parseInt(config.delayLowerBoundForSend) || 6000;
     }
+
+    pluginLog("抢红包延迟 " + randomDelay + "ms")
+    await sleep(randomDelay)
+    // 注意：randomDelayForSend 的延迟在实际发送消息前使用（后续的 sleep(randomDelayForSend)）
 
     if (redChannel === 32) {
         //说明是口令红包，要输出口令
@@ -366,7 +392,7 @@ export async function grabRedBag(payload) {
                     "elementType": 1,
                     "elementId": "",
                     "textElement": {
-                        "content": `[Grab RedBag]抢来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的红包时失败！红包已被领完！`,
+                        "content": `[Grab RedBag]抢来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的红包时失败！红包已被领完！`,
                         "atType": 0,
                         "atUid": "",
                         "atTinyId": "",
@@ -392,7 +418,7 @@ export async function grabRedBag(payload) {
                     pluginLog(`恢复监听群${peerName}(${peerUid})`)
                 }, antiDetectTime)
                 if (config.notifyOnBlocked) {
-                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]抢到来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"发送的一分钱红包，已暂停该群抢红包5分钟。`)
+                    await sendNotifyMsg(IsGroup, receiver, `[Grab RedBag]抢到来自群"${peerName}(${peerUid})"成员:"${senderName}(${sendUin})"在${standardTime}发送的一分钱红包，已暂停该群抢红包5分钟。`)
                 }
             }
 
@@ -401,6 +427,8 @@ export async function grabRedBag(payload) {
                 .replace("%peerUid%", peerUid)
                 .replace("%senderName%", senderName)
                 .replace("%sendUin%", sendUin)
+                .replace("%msgTime%", msgTime)
+                .replace("%standardTime%", standardTime)
                 .replace("%amount%", amount.toFixed(2))
 
             await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
@@ -429,9 +457,9 @@ export async function grabRedBag(payload) {
     }
 
     //下面给对方发送消息
-    if (config.thanksMsgs.length !== 0 && sendUin !== recvUin) {//给对方发送消息。抢自己的红包不发送消息
+    if (config.thanksMsgs.length !== 0 && sendUin !== recvUin && msgTime * 1000 + randomDelayForSend + 5000 > Date.now()) {//给对方发送消息。抢自己的红包不发送消息
+        pluginLog("准备给对方发送消息,延迟" + randomDelayForSend + "ms")
         await sleep(randomDelayForSend)
-        pluginLog("准备给对方发送消息,随机延迟" + randomDelayForSend + "ms")
         console.log("[Grab-RedBag] 发送感谢消息")
         await pluginAPI.invokeNative('ntApi', "nodeIKernelMsgService/sendMsg", false, {
             "msgId": "0",

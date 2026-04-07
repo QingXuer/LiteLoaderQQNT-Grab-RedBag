@@ -46,6 +46,16 @@
                 <hr class="horizontal-dividing-line"/>
                 <div class="vertical-list-item">
                     <div>
+                        <h2>不抢自己发的红包</h2>
+                        <span class="secondary-text">开启后，不会抢自己发送的红包</span>
+                    </div>
+                    <div id="gr-anti-myself-button" class="q-switch">
+                        <span class="q-switch__handle"></span>
+                    </div>
+                </div>
+                <hr class="horizontal-dividing-line"/>
+                <div class="vertical-list-item">
+                    <div>
                         <h2>黑白名单拦截时提醒</h2>
                         <span class="secondary-text">红包被黑白名单拦截未领取时，仍然发送提醒消息</span>
                     </div>
@@ -82,46 +92,30 @@
                     </div>
                 </div>
                 <hr class="horizontal-dividing-line"/>
-                <div class="vertical-list-item">
-                    <div>
-                        <h2>自定义回馈信息</h2>
-                        <span class="secondary-text">自定义抢到红包后发给自己的消息。替换符如下：%peerName%:群名、%peerUid%群号、%senderName%:发送者昵称、
-                        %sendUin%:发送者Q号、%amount%:红包金额</span>
+                    <div class="vertical-list-item" style="display: flex; flex-direction: column; width: 100%;">
+                        <div>
+                            <h2>自定义回馈信息</h2>
+                            <span class="secondary-text">自定义抢到红包后发给自己的消息。替换符如下：%peerName%:群名、%peerUid%群号、%senderName%:发送者昵称、
+                            %sendUin%:发送者Q号、%msgTime%:红包消息时间(Unix timestamp)、%standardTime%:红包消息时间(UTC+8)、%amount%:红包金额</span>
+                        </div>
+                        <input data-type="primary" id="gr-receive-msg-input"
+                               class="q-input__inner q-input__inner--clearable custom-input independent-key-input"
+                               type="text" placeholder="这里什么都没有！"
+                               style="width: 100%; box-sizing: border-box; margin-top: 12px;">
                     </div>
-                    <input data-type="primary" id="gr-receive-msg-input" style="width: 85%"
-                           class="q-input__inner q-input__inner--clearable custom-input independent-key-input"
-                           type="text" placeholder="这里什么都没有！">
-                </div>
                 <hr class="horizontal-dividing-line"/>
+
+                
                 <div class="vertical-list-item">
                     <div>
-                        <h2>启用随机延迟</h2>
-                        <span class="secondary-text">等待区间内的随机时间后再领取红包和发送回馈消息，单位ms，请输入整数</span>
+                        <h2>启用抢红包随机延迟</h2>
+                        <span class="secondary-text">等待区间内的随机时间后再领取红包，单位ms，请输入整数。若不启用则以延迟下限为默认延迟。</span>
                     </div>
                     <div id="gr-random-delay-button" class="q-switch">
                         <span class="q-switch__handle"></span>
                     </div>
                 </div>
-                <hr class="horizontal-dividing-line"/>
-                <div class="vertical-list-item">
-                    <div>
-                        <h2>禁用抢红包时段</h2>
-                        <span class="secondary-text">在该区间内不会自动抢红包，常用于凌晨。</span>
-                    </div>
-
-                    <div style="width: 35%;display: flex;justify-content: space-around;margin-right: -30px">
-                        <!-- 开始时间选择 -->
-                        <input type="time" id="startTime" style="font-size: 18px"/>
-                        <p>&nbsp;|&nbsp;&nbsp;&nbsp;</p>
-                        <!-- 结束时间选择 -->
-                        <input type="time" id="endTime" style="font-size: 18px"/>
-                    </div>
-
-                    <div id="stop-grab-by-time-button" class="q-switch">
-                        <span class="q-switch__handle"></span>
-                    </div>
-                </div>
-                <hr class="horizontal-dividing-line"/>
+                
                 <div class="vertical-list-item">
                     <div class="independent-key-div">
                         <h2 style="margin-right: 25px">抢红包延迟下限</h2>
@@ -136,6 +130,19 @@
                                type="text" placeholder="包含上限值">
                     </div>
                 </div>
+                <hr class="horizontal-dividing-line"/>
+
+                
+                <div class="vertical-list-item">
+                    <div>
+                        <h2>启用发回复随机延迟</h2>
+                        <span class="secondary-text">等待区间内的随机时间后再发送消息，单位ms，请输入整数。若不启用则以延迟下限为默认延迟。</span>
+                    </div>
+                    <div id="gr-random-delay-send-button" class="q-switch">
+                        <span class="q-switch__handle"></span>
+                    </div>
+                </div>
+                
                 <div class="vertical-list-item">
                     <div class="independent-key-div">
                         <h2 style="margin-right: 25px">发回复延迟下限</h2>
@@ -151,6 +158,7 @@
                     </div>
                 </div>
                 <hr class="horizontal-dividing-line"/>
+
                 <div class="vertical-list-item">
                     <div>
                         <h2>红包感谢消息</h2>
@@ -258,11 +266,9 @@
                     </div>
                     <h2 style="font-weight: 500;font-size: 17px" id="info-money-amount">0821</h2>
                 </div>
-
             </div>
         </div>
     </section>
-
 
     <section class="path">
         <h1>插件说明</h1>
@@ -284,11 +290,9 @@
                     <h1>喜欢请点小星星 (✧ω✧)</h1>
                 </div>
                 <hr class="horizontal-dividing-line"/>
-
             </div>
         </div>
     </section>
-
 
     <style>
         #gr-block-type-selector,
@@ -298,16 +302,15 @@
             font-size: 14px;
             border-radius: 2px;
             border: 1px solid #ccc;
-            background-color: var(--background-color-05); /*跟随主题色*/
+            background-color: var(--background-color-05);
             cursor: pointer;
             outline: none;
             padding: 3px;
-
         }
 
         #gr-block-type-selector option,
         #gr-send2who-type-selector option {
-            background-color: var(--background-color-05); /* 修改选项的背景色 */
+            background-color: var(--background-color-05);
             opacity: 0.8;
             color: #333;
             padding: 10px;
@@ -316,8 +319,8 @@
 
         #gr-block-type-selector option:hover,
         #gr-send2who-type-selector option:hover {
-            background-color: #66ccff; /* 当鼠标悬停时的背景色 */
-            color: #fff; /* 改变文字颜色 */
+            background-color: #66ccff;
+            color: #fff;
         }
 
         #gr-block-type-selector:focus,
@@ -328,7 +331,6 @@
 
         .custom-input {
             color: gray;
-            /*background-color: #abbbbb; !* 暗色背景 *!*/
         }
 
         .independent-key-input {
@@ -356,7 +358,6 @@
             margin-right: 10px;
         }
 
-        /* 通用 */
         .config_view {
             margin: 20px;
             overflow-y: auto;
@@ -372,7 +373,6 @@
         }
 
         .config_view .wrap {
-            /* Linux样式兼容：--fg_white */
             background-color: var(--fill_light_primary, var(--fg_white));
             border-radius: 8px;
             font-size: min(var(--font_size_3), 18px);
@@ -435,8 +435,6 @@
             align-items: center;
         }
 
-
-        /* 版本号 */
         .config_view .versions .wrap {
             display: flex;
             justify-content: space-between;
@@ -450,7 +448,6 @@
             text-align: center;
         }
 
-
         @media (prefers-color-scheme: light) {
             .text_color {
                 color: black;
@@ -462,6 +459,5 @@
                 color: white;
             }
         }
-
     </style>
 </div>

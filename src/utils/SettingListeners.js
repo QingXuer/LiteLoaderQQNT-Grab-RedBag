@@ -3,7 +3,7 @@ import {pluginLog} from "./frontLogUtils.js";
 const grAPI = window.grab_redbag
 
 export class SettingListeners {
-    constructor(doc) {//传入一个document对象
+    constructor(doc) {
         this.document = doc
     }
 
@@ -11,21 +11,17 @@ export class SettingListeners {
         const activeButton = this.document.querySelector('#gr-active-button')
         if ((await grAPI.getConfig()).isActive) activeButton.classList.toggle('is-active')
 
-
         activeButton.addEventListener('click', async () => {
             const isActive = (await grAPI.getConfig()).isActive
             activeButton.classList.toggle('is-active')
 
-            if (isActive) {//准备关闭抢红包功能，那么要取消监听
-                grAPI.sendMsgToChatWindows('LiteLoader.grab_redbag.unSubscribeListener')//发送消息给主进程，让主进程通知聊天界面取消监听
-
+            if (isActive) {
+                grAPI.sendMsgToChatWindows('LiteLoader.grab_redbag.unSubscribeListener')
                 pluginLog("取消监听红包消息")
-            } else {//准备打开抢红包功能，那么就打开！
-                grAPI.sendMsgToChatWindows('LiteLoader.grab_redbag.subscribeListener')//发送消息给主进程，让主进程通知聊天界面开始监听
+            } else {
+                grAPI.sendMsgToChatWindows('LiteLoader.grab_redbag.subscribeListener')
                 pluginLog("开始监听红包消息")
             }
-
-            //修改状态
             await grAPI.setConfig({isActive: !isActive})
         })
     }
@@ -37,7 +33,6 @@ export class SettingListeners {
         button.addEventListener('click', async () => {
             const isActiveAllGroups = (await grAPI.getConfig()).isActiveAllGroups
             button.classList.toggle('is-active')
-            //修改状态
             await grAPI.setConfig({isActiveAllGroups: !isActiveAllGroups})
         })
     }
@@ -49,8 +44,20 @@ export class SettingListeners {
         btn.addEventListener('click', async () => {
             const isAntiDetect = (await grAPI.getConfig()).antiDetect
             btn.classList.toggle('is-active')
-            //修改状态
             await grAPI.setConfig({antiDetect: !isAntiDetect})
+        })
+    }
+
+    async antiMyselfButtonListener() {
+        const button = this.document.querySelector('#gr-anti-myself-button')
+        if (!button) return
+        const config = await grAPI.getConfig()
+        if (config.antiMyself) button.classList.toggle('is-active')
+
+        button.addEventListener('click', async () => {
+            const antiMyself = (await grAPI.getConfig()).antiMyself
+            button.classList.toggle('is-active')
+            await grAPI.setConfig({antiMyself: !antiMyself})
         })
     }
 
@@ -72,7 +79,6 @@ export class SettingListeners {
         button.addEventListener('click', async () => {
             const notificationonly = (await grAPI.getConfig()).notificationonly
             button.classList.toggle('is-active')
-            //修改状态
             await grAPI.setConfig({notificationonly: !notificationonly})
         })
     }
@@ -84,8 +90,20 @@ export class SettingListeners {
         delayButton.addEventListener('click', async () => {
             const useRandomDelay = (await grAPI.getConfig()).useRandomDelay
             delayButton.classList.toggle('is-active')
-            //修改状态
             await grAPI.setConfig({useRandomDelay: !useRandomDelay})
+        })
+    }
+
+    async randomDelaySendButtonListener() {
+        const sendDelayButton = this.document.querySelector('#gr-random-delay-send-button')
+        if (!sendDelayButton) return;
+        const config = await grAPI.getConfig();
+        if (config.useRandomDelayForSend) sendDelayButton.classList.toggle('is-active')
+
+        sendDelayButton.addEventListener('click', async () => {
+            const useRandomDelayForSend = (await grAPI.getConfig()).useRandomDelayForSend
+            sendDelayButton.classList.toggle('is-active')
+            await grAPI.setConfig({useRandomDelayForSend: !useRandomDelayForSend})
         })
     }
 
@@ -107,7 +125,8 @@ export class SettingListeners {
 
     async lowerBoundSendInputListener() {
         const input = this.document.querySelector('#gr-lower-bound-send-input')
-        input.value = (await grAPI.getConfig()).delayLowerBoundForSend
+        const config = await grAPI.getConfig();
+        input.value = config.delayLowerBoundForSend
         input.addEventListener('change', async event => {
             await grAPI.setConfig({delayLowerBoundForSend: event.target.value})
         })
@@ -115,7 +134,8 @@ export class SettingListeners {
 
     async upperBoundSendInputListener() {
         const input = this.document.querySelector('#gr-upper-bound-send-input')
-        input.value = (await grAPI.getConfig()).delayUpperBoundForSend
+        const config = await grAPI.getConfig();
+        input.value = config.delayUpperBoundForSend
         input.addEventListener('change', async event => {
             await grAPI.setConfig({delayUpperBoundForSend: event.target.value})
         })
@@ -128,7 +148,6 @@ export class SettingListeners {
         button.addEventListener('click', async () => {
             const useSelfNotice = (await grAPI.getConfig()).useSelfNotice
             button.classList.toggle('is-active')
-            //修改状态
             await grAPI.setConfig({useSelfNotice: !useSelfNotice})
         })
     }
@@ -170,10 +189,8 @@ export class SettingListeners {
         const input = this.document.querySelector('#gr-Send2Who-input')
         const config = await grAPI.getConfig()
 
-        // 初始化下拉选择器
         typeSelector.value = config.Send2WhoType || "0"
 
-        // 根据类型控制输入框显隐和placeholder
         const updateInputState = (type) => {
             if (type === "0" || type === "1") {
                 input.style.display = "none"
@@ -183,23 +200,18 @@ export class SettingListeners {
             }
         }
         updateInputState(typeSelector.value)
-
-        // 初始化输入框值
         input.value = config.Send2Who.join(",")
 
-        // 下拉切换事件
         typeSelector.addEventListener('change', async event => {
             const type = event.target.value
             updateInputState(type)
             await grAPI.setConfig({Send2WhoType: type})
-            // 切换到自己/我的手机时清空号码
             if (type === "0" || type === "1") {
                 input.value = ""
                 await grAPI.setConfig({Send2Who: []})
             }
         })
 
-        // 输入框事件
         input.addEventListener('change', async event => {
             await grAPI.setConfig({Send2Who: event.target.value.split(',').filter(item => item.trim() !== "")})
         })
@@ -229,7 +241,6 @@ export class SettingListeners {
         })
     }
 
-    //监听黑、白名单模式切换
     async blockTypeListener() {
         let blockType = undefined
         const typeSelEl = this.document.querySelector('#gr-block-type-selector')
@@ -237,14 +248,11 @@ export class SettingListeners {
 
         typeSelEl.addEventListener('change', async event => {
             blockType = event.target.value
-
-            // 发送设置密钥事件
             await grAPI.setConfig({blockType: blockType})
             console.log('[GR]名单设置为' + blockType)
         })
     }
 
-    //显示统计信息
     async showHistoryInfo() {
         const textNum = this.document.querySelector("#info-redbag-num")
         const textAmount = this.document.querySelector("#info-money-amount")
@@ -253,7 +261,6 @@ export class SettingListeners {
         textAmount.innerText = config.totalAmount.toFixed(2)
     }
 
-    //根据时间停止抢红包按钮
     async StopGrabByTimeButtonListener() {
         const button = this.document.querySelector('#stop-grab-by-time-button')
         if ((await grAPI.getConfig()).stopGrabByTime) button.classList.toggle('is-active')
@@ -261,12 +268,10 @@ export class SettingListeners {
         button.addEventListener('click', async () => {
             const stopGrabByTime = (await grAPI.getConfig()).stopGrabByTime
             button.classList.toggle('is-active')
-            //修改状态
             await grAPI.setConfig({stopGrabByTime: !stopGrabByTime})
         })
     }
 
-    //开始时间控制
     async startTimeInputListener() {
         const startTimeInput = this.document.querySelector('#startTime')
         const Config = await grAPI.getConfig()
@@ -286,7 +291,7 @@ export class SettingListeners {
             grAPI.setConfig({stopGrabEndTime: event.target.value})
         })
     }
-    //监听自定义收取红包消息.
+
     async receiveMsgListener(){
         const input=this.document.querySelector("#gr-receive-msg-input")
         const Config = await grAPI.getConfig()
@@ -323,5 +328,7 @@ export class SettingListeners {
         this.receiveMsgListener()
         this.antiDetectBtnListener()
         this.notifyOnBlockedBtnListener()
+        this.randomDelaySendButtonListener()
+        this.antiMyselfButtonListener()
     }
 }

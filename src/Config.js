@@ -7,11 +7,12 @@ class Config {
         isActive: true,//是否开启抢红包功能
         notificationonly: false,//是否仅通知
         antiDetect:false,//是否启用一分钱检测
+        antiMyself:false,//是否启用不抢自己红包
         useRandomDelay: false,//是否启用随机延迟
-        delayLowerBound: "",
+        delayLowerBound: "1000",
         delayUpperBound: "",
         useRandomDelayForSend: false,//是否启用随机延迟，给对方发送消息
-        delayLowerBoundForSend: "",
+        delayLowerBoundForSend: "6000",
         delayUpperBoundForSend: "",
         avoidKeyWords: [],//屏蔽词
         avoidGroups: [],//屏蔽群聊
@@ -32,7 +33,7 @@ class Config {
         stopGrabStartTime:"00:00",//暂停抢红包的开始时间
         stopGrabEndTime:"00:00",//暂停抢红包的结束时间
         notifyOnBlocked: false,//黑白名单拦截时是否发送提醒
-        receiveMsg: "[Grab RedBag]收到来自群\"%peerName%(%peerUid%)\"成员:\"%senderName%(%sendUin%)\"发送的的红包%amount%元"
+        receiveMsg: "[Grab RedBag]收到来自群\"%peerName%(%peerUid%)\"成员:\"%senderName%(%sendUin%)\"在%standardTime%发送的红包%amount%元"
     }
 
     static initConfig(pluginPath, configPath) {
